@@ -2,7 +2,7 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const admin = require("firebase-admin");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -23,7 +23,6 @@ app.use(
 app.use(express.json());
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.2ok3xcp.mongodb.net/?appName=Cluster0`;
-console.log(uri);
 
 const client = new MongoClient(uri, {
   serverApi: {
@@ -60,6 +59,7 @@ async function run() {
     const database = client.db("Lessonlab");
     const LessonColletion = database.collection("LessonCollection");
     const UserCollection = database.collection("UserCollection");
+    const lessonsReports = database.collection("lessonsReports");
 
     app.get("/", (req, res) => {
       res.send("Lesson Lab is coocking.............");
@@ -169,6 +169,279 @@ async function run() {
           message: "Something went wrong",
           error: error.message,
         });
+      }
+    });
+
+    app.get("/publicLesson", async (req, res) => {
+      try {
+        let query = { visibility: "Public" };
+        const resut = await LessonColletion.find(query).toArray();
+        res.send({ success: true, resut });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+    // GET LESSONS (OWNER → only own lessons, ADMIN → all lessons)
+    app.get("/lessons", verifyToken, async (req, res) => {
+      try {
+        const email = req.user.email;
+
+        // Find requester from database
+        const requester = await UserCollection.findOne({ email });
+
+        if (!requester) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        let query = {};
+
+        // If user is not admin, fetch only their lessons
+        if (requester.role !== "admin") {
+          query = { author_email: email };
+        }
+
+        const lessons = await LessonColletion.find(query).toArray();
+
+        res.send({ success: true, lessons });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // GET SINGLE LESSON
+    app.get("/lesson/:id", async (req, res) => {
+      try {
+        const id = req.params.id;
+        const lesson = await LessonColletion.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res
+            .status(404)
+            .send({ success: false, message: "Lesson not found" });
+        }
+
+        res.send({ success: true, lesson });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // UPDATE LESSON (OWNER OR ADMIN)
+    app.put("/lesson/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updateData = req.body;
+
+        const lesson = await LessonColletion.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        // Find requester from DB
+        const requester = await UserCollection.findOne({
+          email: req.user.email,
+        });
+
+        // Permission Check
+        if (
+          lesson.author_email !== req.user.email &&
+          requester.role !== "admin"
+        ) {
+          return res.status(403).send({ message: "Forbidden: Not authorized" });
+        }
+
+        const result = await LessonColletion.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+
+        res.send({
+          success: true,
+          message: "Lesson updated successfully",
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // DELETE LESSON (OWNER OR ADMIN)
+    app.delete("/lesson/:id", verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        const lesson = await LessonColletion.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!lesson) {
+          return res.status(404).send({ message: "Lesson not found" });
+        }
+
+        // Find requester from DB
+        const requester = await UserCollection.findOne({
+          email: req.user.email,
+        });
+
+        // Permission Check
+        if (
+          lesson.author_email !== req.user.email &&
+          requester.role !== "admin"
+        ) {
+          return res.status(403).send({ message: "Forbidden: Not authorized" });
+        }
+
+        const result = await LessonColletion.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        res.send({
+          success: true,
+          message: "Lesson deleted successfully",
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // ------------------------
+    // TOGGLE LESSON LIKE / Save to favourite
+    // ------------------------
+    app.put("/like/:id", verifyToken, async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const userEmail = req.user.email;
+
+        // Find the lesson
+        const lesson = await LessonColletion.findOne({
+          _id: new ObjectId(lessonId),
+        });
+        if (!lesson) {
+          return res
+            .status(404)
+            .json({ success: false, message: "Lesson not found" });
+        }
+
+        lesson.isLiked = lesson.isLiked || [];
+
+        let update;
+        if (lesson.isLiked.includes(userEmail)) {
+          // Remove like
+          update = { $pull: { isLiked: userEmail }, $inc: { likesCount: -1 } };
+        } else {
+          // Add like
+          update = {
+            $addToSet: { isLiked: userEmail },
+            $inc: { likesCount: 1 },
+          };
+        }
+
+        const updatedLesson = await LessonColletion.findOneAndUpdate(
+          { _id: new ObjectId(lessonId) },
+          update,
+          { returnDocument: "after" } // MongoDB >=4.4
+        );
+
+        res.json({
+          success: true,
+          message: "Like toggled successfully",
+          lesson: updatedLesson,
+          likes: updatedLesson.isLiked.includes(userEmail),
+        });
+      } catch (error) {
+        console.error("Toggle like error:", error);
+        res.status(500).json({ success: false, message: error.message });
+      }
+    });
+    app.put("/save/:id", verifyToken, async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const userEmail = req.user.email;
+
+        // Find the lesson
+        const lesson = await LessonColletion.findOne({
+          _id: new ObjectId(lessonId),
+        });
+        if (!lesson) {
+          return res
+            .status(404)
+            .json({ success: false, message: "Lesson not found" });
+        }
+
+        lesson.isSaved = lesson.isSaved || [];
+
+        let update;
+        if (lesson.isSaved.includes(userEmail)) {
+          // Remove from favorites
+          update = {
+            $pull: { isSaved: userEmail },
+            $inc: { saveCount: -1 },
+            $set: { updated_at: new Date() },
+          };
+        } else {
+          // Add to favorites
+          update = {
+            $addToSet: { isSaved: userEmail },
+            $inc: { saveCount: 1 },
+            $set: { updated_at: new Date() },
+          };
+        }
+
+        const updatedLesson = await LessonColletion.findOneAndUpdate(
+          { _id: new ObjectId(lessonId) },
+          update,
+          { returnDocument: "after" }
+        );
+
+        res.json({
+          success: true,
+          message: updatedLesson.isSaved.includes(userEmail)
+            ? "Added to favorites"
+            : "Removed from favorites",
+          lesson: updatedLesson,
+          isSaved: updatedLesson.isSaved.includes(userEmail),
+          saveCount: updatedLesson.saveCount,
+        });
+      } catch (error) {
+        console.error("Toggle save error:", error);
+        res.status(500).json({ success: false, message: error.message });
+      }
+    });
+
+    app.post("/report/:id", verifyToken, async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const userEmail = req.user.email; // reporter email
+        const { reason } = req.body;
+
+        if (!reason) {
+          return res.json({ success: false, message: "Reason is required" });
+        }
+
+        const reportEntry = {
+          lessonId: new ObjectId(lessonId),
+          reporterEmail: userEmail,
+          reason: reason,
+          timestamp: new Date(),
+        };
+
+        // Insert into lessonReports collection
+        const result = await lessonsReports.insertOne(reportEntry);
+
+        res.json({
+          success: true,
+          message: "Lesson reported successfully",
+          reportId: result.insertedId,
+        });
+      } catch (error) {
+        console.error("Report error:", error);
+        res.status(500).json({ success: false, message: "Server error" });
       }
     });
 
