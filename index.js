@@ -60,6 +60,7 @@ async function run() {
     const LessonColletion = database.collection("LessonCollection");
     const UserCollection = database.collection("UserCollection");
     const lessonsReports = database.collection("lessonsReports");
+    const CommentsCollection = database.collection("CommentsCollection");
 
     app.get("/", (req, res) => {
       res.send("Lesson Lab is coocking.............");
@@ -173,14 +174,57 @@ async function run() {
     });
 
     app.get("/publicLesson", async (req, res) => {
-      try {
-        let query = { visibility: "Public" };
-        const resut = await LessonColletion.find(query).toArray();
-        res.send({ success: true, resut });
-      } catch (error) {
-        res.status(500).send({ success: false, message: error.message });
-      }
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const pageSize = parseInt(req.query.pageSize) || 8;
+    const search = req.query.search || "";
+    const category = req.query.category || "";
+    const tone = req.query.tone || "";
+    const sort = req.query.sort || ""; // "newest" or "mostSaved"
+
+    // Build filter object
+const filter = { visibility: { $regex: /^public$/i } };
+
+    if (search) {
+      filter.title = { $regex: search, $options: "i" }; // case-insensitive search by title
+    }
+
+    if (category) {
+      filter.category = category;
+    }
+
+    if (tone) {
+      filter.emotionalTone = tone;
+    }
+
+    // Build sort object
+    let sortOption = {};
+    if (sort === "newest") {
+      sortOption = { created_at: -1 }; // newest first
+    } else if (sort === "mostSaved") {
+      sortOption = { savedCount: -1 }; // most saved
+    }
+
+    const totalLessons = await LessonColletion.countDocuments(filter);
+
+    const lessons = await LessonColletion.find(filter)
+      .sort(sortOption)
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .toArray();
+
+    res.json({
+      lessons,
+      totalPages: Math.ceil(totalLessons / pageSize),
+      currentPage: page,
+      totalLessons,
     });
+  } catch (error) {
+    console.error("Error fetching public lessons:", error);
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
     // GET LESSONS (OWNER → only own lessons, ADMIN → all lessons)
     app.get("/lessons", verifyToken, async (req, res) => {
       try {
@@ -442,6 +486,98 @@ async function run() {
       } catch (error) {
         console.error("Report error:", error);
         res.status(500).json({ success: false, message: "Server error" });
+      }
+    });
+
+    //---------------------------
+    //  comment
+    // --------------------------------
+    app.get("/comments/:lessonId", async (req, res) => {
+      try {
+        const lessonId = req.params.lessonId;
+
+        const comments = await CommentsCollection.find({ lessonId })
+          .sort({ created_at: 1 })
+          .toArray();
+
+        res.json(comments);
+      } catch (error) {
+        console.error("Get comments error:", error);
+        res
+          .status(500)
+          .json({ success: false, message: "Failed to fetch comments" });
+      }
+    });
+    app.post("/comments/:lessonId", verifyToken, async (req, res) => {
+      try {
+        const lessonId = req.params.lessonId;
+        const { text } = req.body;
+
+        if (!text || !text.trim()) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Comment text is required" });
+        }
+
+        // Logged-in user info from verifyToken middleware
+        const userEmail = req.user.email;
+        const userName =
+          req.user.name || req.user.displayName || "Unknown User";
+
+        const newComment = {
+          lessonId,
+          userEmail,
+          userName,
+          text,
+          created_at: new Date(),
+        };
+
+        const result = await CommentsCollection.insertOne(newComment);
+
+        // Send inserted comment back including _id
+        res.json({
+          ...newComment,
+          _id: result.insertedId,
+          time: "Just now", // for instant UI update
+        });
+      } catch (error) {
+        console.error("Post comment error:", error);
+        res
+          .status(500)
+          .json({ success: false, message: "Failed to post comment" });
+      }
+    });
+    // GET /lessons/similar/:lessonId
+    app.get("/lessons/similar/:lessonId", async (req, res) => {
+      try {
+        const { lessonId } = req.params;
+
+        // Find the current lesson first
+        const currentLesson = await LessonColletion.findOne({
+          _id: new ObjectId(lessonId),
+        });
+        if (!currentLesson) {
+          return res
+            .status(404)
+            .json({ success: false, message: "Lesson not found" });
+        }
+
+        const { category, emotionalTone } = currentLesson;
+
+        // Find lessons with same category or emotional tone, excluding current lesson
+        const similarLessons = await LessonColletion.find({
+          _id: { $ne: new ObjectId(lessonId) },
+          $or: [{ category: category }, { emotionalTone: emotionalTone }],
+        })
+          .limit(6) // max 6 lessons
+          .toArray();
+
+        res.json(similarLessons);
+      } catch (error) {
+        console.error("Failed to fetch similar lessons:", error);
+        res
+          .status(500)
+          .json({ success: false, message: "Failed to fetch similar lessons" });
       }
     });
 
