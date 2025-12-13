@@ -174,56 +174,56 @@ async function run() {
     });
 
     app.get("/publicLesson", async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const pageSize = parseInt(req.query.pageSize) || 8;
-    const search = req.query.search || "";
-    const category = req.query.category || "";
-    const tone = req.query.tone || "";
-    const sort = req.query.sort || ""; // "newest" or "mostSaved"
+      try {
+        const page = parseInt(req.query.page) || 1;
+        const pageSize = parseInt(req.query.pageSize) || 8;
+        const search = req.query.search || "";
+        const category = req.query.category || "";
+        const tone = req.query.tone || "";
+        const sort = req.query.sort || ""; // "newest" or "mostSaved"
 
-    // Build filter object
-const filter = { visibility: { $regex: /^public$/i } };
+        // Build filter object
+        const filter = { visibility: { $regex: /^public$/i } };
 
-    if (search) {
-      filter.title = { $regex: search, $options: "i" }; // case-insensitive search by title
-    }
+        if (search) {
+          filter.title = { $regex: search, $options: "i" }; // case-insensitive search by title
+        }
 
-    if (category) {
-      filter.category = category;
-    }
+        if (category) {
+          filter.category = category;
+        }
 
-    if (tone) {
-      filter.emotionalTone = tone;
-    }
+        if (tone) {
+          filter.emotionalTone = tone;
+        }
 
-    // Build sort object
-    let sortOption = {};
-    if (sort === "newest") {
-      sortOption = { created_at: -1 }; // newest first
-    } else if (sort === "mostSaved") {
-      sortOption = { savedCount: -1 }; // most saved
-    }
+        // Build sort object
+        let sortOption = {};
+        if (sort === "newest") {
+          sortOption = { created_at: -1 }; // newest first
+        } else if (sort === "mostSaved") {
+          sortOption = { savedCount: -1 }; // most saved
+        }
 
-    const totalLessons = await LessonColletion.countDocuments(filter);
+        const totalLessons = await LessonColletion.countDocuments(filter);
 
-    const lessons = await LessonColletion.find(filter)
-      .sort(sortOption)
-      .skip((page - 1) * pageSize)
-      .limit(pageSize)
-      .toArray();
+        const lessons = await LessonColletion.find(filter)
+          .sort(sortOption)
+          .skip((page - 1) * pageSize)
+          .limit(pageSize)
+          .toArray();
 
-    res.json({
-      lessons,
-      totalPages: Math.ceil(totalLessons / pageSize),
-      currentPage: page,
-      totalLessons,
+        res.json({
+          lessons,
+          totalPages: Math.ceil(totalLessons / pageSize),
+          currentPage: page,
+          totalLessons,
+        });
+      } catch (error) {
+        console.error("Error fetching public lessons:", error);
+        res.status(500).json({ success: false, message: error.message });
+      }
     });
-  } catch (error) {
-    console.error("Error fetching public lessons:", error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-});
 
     // GET LESSONS (OWNER → only own lessons, ADMIN → all lessons)
     app.get("/lessons", verifyToken, async (req, res) => {
@@ -273,10 +273,15 @@ const filter = { visibility: { $regex: /^public$/i } };
     });
 
     // UPDATE LESSON (OWNER OR ADMIN)
-    app.put("/lesson/:id", verifyToken, async (req, res) => {
+    app.patch("/lesson/:id", verifyToken, async (req, res) => {
       try {
         const id = req.params.id;
         const updateData = req.body;
+        delete updateData._id;
+        delete updateData.author_email;
+        delete updateData.author_name;
+        delete updateData.author_photo;
+        delete updateData.created_at;
 
         const lesson = await LessonColletion.findOne({
           _id: new ObjectId(id),
@@ -578,6 +583,67 @@ const filter = { visibility: { $regex: /^public$/i } };
         res
           .status(500)
           .json({ success: false, message: "Failed to fetch similar lessons" });
+      }
+    });
+
+    // ----------------- favourites -----------------------------
+
+    // GET my favorite lessons
+    app.get("/my-favorites", verifyToken, async (req, res) => {
+      try {
+        const userEmail = req.user.email;
+        const { category, tone } = req.query;
+
+        const query = {
+          isSaved: userEmail,
+        };
+
+        if (category) {
+          query.category = category;
+        }
+
+        if (tone) {
+          query.emotionalTone = tone;
+        }
+
+        const favorites = await LessonColletion.find(query)
+          .sort({ updated_at: -1 })
+          .toArray();
+
+        res.json({
+          success: true,
+          data: favorites,
+        });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: error.message,
+        });
+      }
+    });
+
+    app.delete("/favorites/:id", verifyToken, async (req, res) => {
+      try {
+        const lessonId = req.params.id;
+        const userEmail = req.user.email;
+
+        const result = await LessonColletion.findOneAndUpdate(
+          { _id: new ObjectId(lessonId) },
+          {
+            $pull: { isSaved: userEmail },
+            $inc: { saveCount: -1 },
+            $set: { updated_at: new Date() },
+          },
+          { returnDocument: "after" }
+        );
+
+        res.json({
+          success: true,
+          message: "Removed from favorites",
+          lesson: result,
+        });
+      } catch (error) {
+        res.status(500).json({ success: false, message: error.message });
       }
     });
 
