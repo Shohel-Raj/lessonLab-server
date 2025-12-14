@@ -8,6 +8,8 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const serviceAccount = require("./firebaseAdminJdk.json");
+const stripe = require('stripe')(process.env.STRIPE);
+
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -139,19 +141,104 @@ async function run() {
     });
 
     // Admin-only: Get all users
-    app.get("/alluser", verifyToken, async (req, res) => {
+    // GET /admin/users
+    app.get("/admin/users", verifyToken, async (req, res) => {
       try {
         const requesterEmail = req.user.email;
         const requester = await UserCollection.findOne({
           email: requesterEmail,
         });
 
-        if (requester?.role !== "admin") {
+        if (!requester || requester.role !== "admin") {
           return res.status(403).send({ message: "Forbidden (Admin only)" });
         }
 
+        // 1️⃣ Aggregate lesson counts per author
+        const lessonCounts = await LessonColletion.aggregate([
+          {
+            $group: {
+              _id: "$author_email",
+              totalLessons: { $sum: 1 },
+            },
+          },
+        ]).toArray();
+
+        // Convert to a map for quick lookup
+        const lessonMap = {};
+        lessonCounts.forEach((l) => {
+          lessonMap[l._id] = l.totalLessons;
+        });
+
+        // 2️⃣ Get all users and attach totalLessons
         const users = await UserCollection.find().toArray();
-        res.send({ success: true, users });
+        const usersWithLessons = users.map((u) => ({
+          _id: u._id,
+          name: u.name,
+          email: u.email,
+          role: u.role,
+          totalLessons: lessonMap[u.email] || 0,
+        }));
+
+        // Sort by totalLessons descending
+        usersWithLessons.sort((a, b) => b.totalLessons - a.totalLessons);
+
+        res.send({ success: true, users: usersWithLessons });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // PUT /admin/users/:id/role
+    app.put("/admin/users/:id/role", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        const userId = req.params.id;
+        const { role } = req.body; // expected "admin" or "user"
+
+        if (!role || !["user", "admin"].includes(role)) {
+          return res.status(400).send({ message: "Invalid role" });
+        }
+
+        const result = await UserCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          { $set: { role } }
+        );
+
+        res.send({ success: true, message: "User role updated", result });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+    // DELETE /admin/users/:id
+    app.delete("/admin/users/:id", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        const userId = req.params.id;
+
+        const result = await UserCollection.deleteOne({
+          _id: new ObjectId(userId),
+        });
+
+        // Optionally, delete their lessons
+        await LessonColletion.deleteMany({ author_email: requester.email });
+
+        res.send({ success: true, message: "User deleted", result });
       } catch (error) {
         res.status(500).send({ success: false, message: error.message });
       }
@@ -690,137 +777,469 @@ async function run() {
     // ---------------------------
     // Admin Dashboard Data
     // ---------------------------
-  app.get("/admin/dashboard", verifyToken, async (req, res) => {
+    app.get("/admin/dashboard", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        // Total users
+        const totalUsers = await UserCollection.countDocuments();
+
+        // Total public lessons
+        const totalPublicLessons = await LessonColletion.countDocuments({
+          visibility: { $regex: /^public$/i },
+        });
+
+        // Total reported lessons
+        const totalReportedLessons = await lessonsReports.countDocuments();
+
+        // Most active contributors (top 5 users by number of lessons)
+        const mostActiveContributors = await LessonColletion.aggregate([
+          { $group: { _id: "$author_email", lessonCount: { $sum: 1 } } },
+          { $sort: { lessonCount: -1 } },
+          { $limit: 5 },
+          {
+            $lookup: {
+              from: "UserCollection",
+              localField: "_id",
+              foreignField: "email",
+              as: "user",
+            },
+          },
+          { $unwind: "$user" },
+          {
+            $project: {
+              email: "$_id",
+              name: "$user.name",
+              role: "$user.role",
+              lessonCount: 1,
+            },
+          },
+        ]).toArray();
+
+        // Today's new lessons
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const todaysNewLessons = await LessonColletion.countDocuments({
+          $expr: {
+            $gte: [{ $toDate: "$created_at" }, today],
+          },
+        });
+
+        // Last 7 days array
+        const last7Days = [];
+        for (let i = 6; i >= 0; i--) {
+          const d = new Date();
+          d.setDate(d.getDate() - i);
+          d.setHours(0, 0, 0, 0);
+          last7Days.push(d);
+        }
+
+        // Lesson growth (last 7 days) with $toDate
+        const lessonAgg = await LessonColletion.aggregate([
+          {
+            $addFields: {
+              createdDate: { $toDate: "$created_at" }, // convert string to Date
+            },
+          },
+          {
+            $match: {
+              createdDate: { $gte: last7Days[0] },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: "%Y-%m-%d", date: "$createdDate" },
+              },
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray();
+
+        // User growth (last 7 days) with $toDate
+        const userAgg = await UserCollection.aggregate([
+          {
+            $addFields: {
+              createdDate: { $toDate: "$createdAt" }, // convert string to Date
+            },
+          },
+          {
+            $match: {
+              createdDate: { $gte: last7Days[0] },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                $dateToString: { format: "%Y-%m-%d", date: "$createdDate" },
+              },
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { _id: 1 } },
+        ]).toArray();
+
+        // Fill missing dates with 0
+        const formatData = (agg) => {
+          const map = {};
+          agg.forEach((item) => (map[item._id] = item.count));
+          return last7Days.map((date) => {
+            const dStr = date.toISOString().split("T")[0];
+            return { _id: dStr, count: map[dStr] || 0, date: dStr };
+          });
+        };
+
+        const lessonGrowth = formatData(lessonAgg);
+        const userGrowth = formatData(userAgg);
+
+        res.send({
+          success: true,
+          data: {
+            totalUsers,
+            totalPublicLessons,
+            totalReportedLessons,
+            mostActiveContributors,
+            todaysNewLessons,
+            lessonGrowth,
+            userGrowth,
+          },
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+    // GET /admin/lessons?category=&visibility=&flagged=
+    app.get("/admin/lessons", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        const { category, visibility, flagged } = req.query;
+
+        const matchStage = {};
+
+        if (category) {
+          matchStage.category = { $regex: `^${category}$`, $options: "i" };
+        }
+
+        if (visibility) {
+          matchStage.visibility = { $regex: `^${visibility}$`, $options: "i" };
+        }
+
+        /* =======================
+       📊 STATS
+    ======================= */
+
+        const [publicCount, privateCount, flaggedAgg] = await Promise.all([
+          LessonColletion.countDocuments({
+            visibility: { $regex: /^public$/, $options: "i" },
+          }),
+          LessonColletion.countDocuments({
+            visibility: { $regex: /^private$/, $options: "i" },
+          }),
+          lessonsReports
+            .aggregate([{ $group: { _id: "$lessonId" } }, { $count: "total" }])
+            .toArray(),
+        ]);
+
+        const flaggedCount = flaggedAgg[0]?.total || 0;
+
+        /* =======================
+       📚 LESSON LIST
+    ======================= */
+
+        const pipeline = [
+          { $match: matchStage },
+          {
+            $lookup: {
+              from: "lessonsReports", // MUST be exact DB name
+              localField: "_id",
+              foreignField: "lessonId",
+              as: "flags",
+            },
+          },
+          {
+            $addFields: {
+              flagCount: { $size: "$flags" },
+              isFlagged: { $gt: [{ $size: "$flags" }, 0] },
+            },
+          },
+        ];
+
+        if (flagged === "true") {
+          pipeline.push({ $match: { flagCount: { $gt: 0 } } });
+        }
+
+        pipeline.push({ $sort: { created_at: -1 } });
+
+        const lessons = await LessonColletion.aggregate(pipeline).toArray();
+
+        res.send({
+          success: true,
+          stats: {
+            totalPublicLessons: publicCount,
+            totalPrivateLessons: privateCount,
+            totalFlaggedLessons: flaggedCount,
+          },
+          lessons,
+        });
+      } catch (error) {
+        console.error("ADMIN LESSON ERROR:", error);
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // DELETE /admin/lessons/:lessonId
+    app.delete("/admin/lessons/:lessonId", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        const { lessonId } = req.params;
+        const result = await LessonColletion.deleteOne({
+          _id: new ObjectId(lessonId),
+        });
+
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .send({ success: false, message: "Lesson not found" });
+        }
+
+        res.send({ success: true, message: "Lesson deleted successfully" });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+    // PUT /admin/lessons/:lessonId/featured
+    app.put(
+      "/admin/lessons/:lessonId/featured",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const requesterEmail = req.user.email;
+          const requester = await UserCollection.findOne({
+            email: requesterEmail,
+          });
+          if (!requester || requester.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden (Admin only)" });
+          }
+
+          const { lessonId } = req.params;
+          const result = await LessonColletion.updateOne(
+            { _id: new ObjectId(lessonId) },
+            { $set: { featured: true } }
+          );
+
+          if (result.modifiedCount === 0) {
+            return res
+              .status(404)
+              .send({ success: false, message: "Lesson not found" });
+          }
+
+          res.send({ success: true, message: "Lesson marked as featured" });
+        } catch (error) {
+          res.status(500).send({ success: false, message: error.message });
+        }
+      }
+    );
+    // PUT /admin/lessons/:lessonId/reviewed
+    app.put(
+      "/admin/lessons/:lessonId/reviewed",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const requesterEmail = req.user.email;
+          const requester = await UserCollection.findOne({
+            email: requesterEmail,
+          });
+          if (!requester || requester.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden (Admin only)" });
+          }
+
+          const { lessonId } = req.params;
+          const result = await LessonColletion.updateOne(
+            { _id: new ObjectId(lessonId) },
+            { $set: { reviewed: true } }
+          );
+
+          if (result.modifiedCount === 0) {
+            return res
+              .status(404)
+              .send({ success: false, message: "Lesson not found" });
+          }
+
+          res.send({ success: true, message: "Lesson marked as reviewed" });
+        } catch (error) {
+          res.status(500).send({ success: false, message: error.message });
+        }
+      }
+    );
+    // GET /admin/lessons/stats
+    app.get("/admin/lessons/stats", verifyToken, async (req, res) => {
+      try {
+        const requesterEmail = req.user.email;
+        const requester = await UserCollection.findOne({
+          email: requesterEmail,
+        });
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
+
+        const totalPublic = await LessonColletion.countDocuments({
+          visibility: "public",
+        });
+        const totalPrivate = await LessonColletion.countDocuments({
+          visibility: "private",
+        });
+        const totalFlagged = await LessonColletion.countDocuments({
+          flagged: true,
+        });
+
+        res.send({
+          success: true,
+          stats: {
+            totalPublic,
+            totalPrivate,
+            totalFlagged,
+          },
+        });
+      } catch (error) {
+        res.status(500).send({ success: false, message: error.message });
+      }
+    });
+
+
+    // GET /admin/reported-lessons
+app.get("/admin/reported-lessons", verifyToken, async (req, res) => {
   try {
-    const requesterEmail = req.user.email;
-    const requester = await UserCollection.findOne({ email: requesterEmail });
+    const requester = await UserCollection.findOne({
+      email: req.user.email,
+    });
 
     if (!requester || requester.role !== "admin") {
       return res.status(403).send({ message: "Forbidden (Admin only)" });
     }
 
-    // Total users
-    const totalUsers = await UserCollection.countDocuments();
+    const reportedLessons = await lessonsReports.aggregate([
+      // Group reports by lesson
+      {
+        $group: {
+          _id: "$lessonId",
+          reportCount: { $sum: 1 },
+        },
+      },
 
-    // Total public lessons
-    const totalPublicLessons = await LessonColletion.countDocuments({
-      visibility: { $regex: /^public$/i },
-    });
-
-    // Total reported lessons
-    const totalReportedLessons = await lessonsReports.countDocuments();
-
-    // Most active contributors (top 5 users by number of lessons)
-    const mostActiveContributors = await LessonColletion.aggregate([
-      { $group: { _id: "$author_email", lessonCount: { $sum: 1 } } },
-      { $sort: { lessonCount: -1 } },
-      { $limit: 5 },
+      // Join lesson info
       {
         $lookup: {
-          from: "UserCollection",
+          from: "LessonCollection",
           localField: "_id",
-          foreignField: "email",
-          as: "user",
+          foreignField: "_id",
+          as: "lesson",
         },
       },
-      { $unwind: "$user" },
+
+      { $unwind: "$lesson" },
+
+      // Shape response
       {
         $project: {
-          email: "$_id",
-          name: "$user.name",
-          role: "$user.role",
-          lessonCount: 1,
+          lessonId: "$_id",
+          title: "$lesson.title",
+          author_email: "$lesson.author_email",
+          visibility: "$lesson.visibility",
+          reason: "$lesson.reason",
+          reportCount: 1,
+          created_at: "$lesson.created_at",
         },
       },
+
+      { $sort: { reportCount: -1 } },
     ]).toArray();
-
-    // Today's new lessons
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todaysNewLessons = await LessonColletion.countDocuments({
-      created_at: { $gte: today },
-    });
-
-    // Last 7 days array
-    const last7Days = [];
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      d.setHours(0, 0, 0, 0);
-      last7Days.push(d);
-    }
-
-    // Lesson growth (last 7 days) with $toDate
-    const lessonAgg = await LessonColletion.aggregate([
-      {
-        $addFields: {
-          createdDate: { $toDate: "$created_at" } // convert string to Date
-        }
-      },
-      {
-        $match: {
-          createdDate: { $gte: last7Days[0] }
-        }
-      },
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdDate" } },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]).toArray();
-
-    // User growth (last 7 days) with $toDate
-    const userAgg = await UserCollection.aggregate([
-      {
-        $addFields: {
-          createdDate: { $toDate: "$createdAt" } // convert string to Date
-        }
-      },
-      {
-        $match: {
-          createdDate: { $gte: last7Days[0] }
-        }
-      },
-      {
-        $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdDate" } },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { _id: 1 } }
-    ]).toArray();
-
-    // Fill missing dates with 0
-    const formatData = (agg) => {
-      const map = {};
-      agg.forEach((item) => (map[item._id] = item.count));
-      return last7Days.map((date) => {
-        const dStr = date.toISOString().split("T")[0];
-        return { _id: dStr, count: map[dStr] || 0, date: dStr };
-      });
-    };
-
-    const lessonGrowth = formatData(lessonAgg);
-    const userGrowth = formatData(userAgg);
 
     res.send({
       success: true,
-      data: {
-        totalUsers,
-        totalPublicLessons,
-        totalReportedLessons,
-        mostActiveContributors,
-        todaysNewLessons,
-        lessonGrowth,
-        userGrowth,
-      },
+      reportedLessons,
+    });
+  } catch (error) {
+    console.error("Reported lessons error:", error);
+    res.status(500).send({ success: false, message: error.message });
+  }
+});
+// GET /admin/reported-lessons/:lessonId
+app.get("/admin/reported-lessons/:lessonId", verifyToken, async (req, res) => {
+  try {
+    const requester = await UserCollection.findOne({
+      email: req.user.email,
+    });
+
+    if (!requester || requester.role !== "admin") {
+      return res.status(403).send({ message: "Forbidden (Admin only)" });
+    }
+
+    const { lessonId } = req.params;
+
+    const reports = await lessonsReports
+      .find({ lessonId: new ObjectId(lessonId) })
+      .sort({ timestamp: -1 })
+      .toArray();
+
+    res.send({
+      success: true,
+      reports,
     });
   } catch (error) {
     res.status(500).send({ success: false, message: error.message });
   }
 });
+// DELETE /admin/reported-lessons/:lessonId/ignore
+app.delete("/admin/reported-lessons/:lessonId/ignore",verifyToken, async (req, res) => {
+    try {
+      const requester = await UserCollection.findOne({
+        email: req.user.email,
+      });
+
+      if (!requester || requester.role !== "admin") {
+        return res.status(403).send({ message: "Forbidden (Admin only)" });
+      }
+
+      const { lessonId } = req.params;
+
+      await lessonsReports.deleteMany({
+        lessonId: new ObjectId(lessonId),
+      });
+
+      res.send({
+        success: true,
+        message: "Reports ignored and cleared",
+      });
+    } catch (error) {
+      res.status(500).send({ success: false, message: error.message });
+    }
+  }
+);
+
 
 
     await client.db("admin").command({ ping: 1 });
