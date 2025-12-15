@@ -1240,6 +1240,74 @@ app.delete("/admin/reported-lessons/:lessonId/ignore",verifyToken, async (req, r
   }
 );
 
+// --------------- Payment  ---------------------
+app.post("/create-payment-intent", verifyToken, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const email = req.user.email;
+
+    if (!amount) {
+      return res.status(400).send({ message: "Amount required" });
+    }
+
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount * 100, // Stripe uses cents
+      currency: "usd",
+      metadata: {
+        email,              // 👈 store user email
+        purpose: "lifetime_access",
+      },
+    });
+
+    res.send({
+      clientSecret: paymentIntent.client_secret,
+    });
+  } catch (error) {
+    res.status(500).send({ message: error.message });
+  }
+});
+app.post("/payment/confirm", verifyToken, async (req, res) => {
+  try {
+    const { paymentIntentId } = req.body;
+    const email = req.user.email;
+
+    if (!paymentIntentId) {
+      return res.status(400).send({ message: "PaymentIntent ID required" });
+    }
+
+    // 1️⃣ Retrieve payment from Stripe
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+
+    if (paymentIntent.status !== "succeeded") {
+      return res.status(400).send({
+        success: false,
+        message: "Payment not successful",
+      });
+    }
+
+    // 2️⃣ Update user to premium
+    const result = await UserCollection.updateOne(
+      { email },
+      {
+        $set: {
+          isPremium: true,
+          premiumAt: new Date(),
+          paymentIntentId,
+        },
+      }
+    );
+
+    res.send({
+      success: true,
+      message: "User upgraded to Premium",
+      result,
+    });
+  } catch (error) {
+    res.status(500).send({ message: error.message });
+  }
+});
+
+
 
 
     await client.db("admin").command({ ping: 1 });
