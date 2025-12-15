@@ -8,8 +8,7 @@ const app = express();
 const port = process.env.PORT || 3000;
 
 const serviceAccount = require("./firebaseAdminJdk.json");
-const stripe = require('stripe')(process.env.STRIPE);
-
+const stripe = require("stripe")(process.env.STRIPE);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -1129,185 +1128,246 @@ async function run() {
       }
     });
 
-
     // GET /admin/reported-lessons
-app.get("/admin/reported-lessons", verifyToken, async (req, res) => {
-  try {
-    const requester = await UserCollection.findOne({
-      email: req.user.email,
-    });
+    app.get("/admin/reported-lessons", verifyToken, async (req, res) => {
+      try {
+        const requester = await UserCollection.findOne({
+          email: req.user.email,
+        });
 
-    if (!requester || requester.role !== "admin") {
-      return res.status(403).send({ message: "Forbidden (Admin only)" });
-    }
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).send({ message: "Forbidden (Admin only)" });
+        }
 
-    const reportedLessons = await lessonsReports.aggregate([
-      // Group reports by lesson
-      {
-        $group: {
-          _id: "$lessonId",
-          reportCount: { $sum: 1 },
-        },
-      },
+        const reportedLessons = await lessonsReports
+          .aggregate([
+            // Group reports by lesson
+            {
+              $group: {
+                _id: "$lessonId",
+                reportCount: { $sum: 1 },
+              },
+            },
 
-      // Join lesson info
-      {
-        $lookup: {
-          from: "LessonCollection",
-          localField: "_id",
-          foreignField: "_id",
-          as: "lesson",
-        },
-      },
+            // Join lesson info
+            {
+              $lookup: {
+                from: "LessonCollection",
+                localField: "_id",
+                foreignField: "_id",
+                as: "lesson",
+              },
+            },
 
-      { $unwind: "$lesson" },
+            { $unwind: "$lesson" },
 
-      // Shape response
-      {
-        $project: {
-          lessonId: "$_id",
-          title: "$lesson.title",
-          author_email: "$lesson.author_email",
-          visibility: "$lesson.visibility",
-          reason: "$lesson.reason",
-          reportCount: 1,
-          created_at: "$lesson.created_at",
-        },
-      },
+            // Shape response
+            {
+              $project: {
+                lessonId: "$_id",
+                title: "$lesson.title",
+                author_email: "$lesson.author_email",
+                visibility: "$lesson.visibility",
+                reason: "$lesson.reason",
+                reportCount: 1,
+                created_at: "$lesson.created_at",
+              },
+            },
 
-      { $sort: { reportCount: -1 } },
-    ]).toArray();
+            { $sort: { reportCount: -1 } },
+          ])
+          .toArray();
 
-    res.send({
-      success: true,
-      reportedLessons,
-    });
-  } catch (error) {
-    console.error("Reported lessons error:", error);
-    res.status(500).send({ success: false, message: error.message });
-  }
-});
-// GET /admin/reported-lessons/:lessonId
-app.get("/admin/reported-lessons/:lessonId", verifyToken, async (req, res) => {
-  try {
-    const requester = await UserCollection.findOne({
-      email: req.user.email,
-    });
-
-    if (!requester || requester.role !== "admin") {
-      return res.status(403).send({ message: "Forbidden (Admin only)" });
-    }
-
-    const { lessonId } = req.params;
-
-    const reports = await lessonsReports
-      .find({ lessonId: new ObjectId(lessonId) })
-      .sort({ timestamp: -1 })
-      .toArray();
-
-    res.send({
-      success: true,
-      reports,
-    });
-  } catch (error) {
-    res.status(500).send({ success: false, message: error.message });
-  }
-});
-// DELETE /admin/reported-lessons/:lessonId/ignore
-app.delete("/admin/reported-lessons/:lessonId/ignore",verifyToken, async (req, res) => {
-    try {
-      const requester = await UserCollection.findOne({
-        email: req.user.email,
-      });
-
-      if (!requester || requester.role !== "admin") {
-        return res.status(403).send({ message: "Forbidden (Admin only)" });
+        res.send({
+          success: true,
+          reportedLessons,
+        });
+      } catch (error) {
+        console.error("Reported lessons error:", error);
+        res.status(500).send({ success: false, message: error.message });
       }
-
-      const { lessonId } = req.params;
-
-      await lessonsReports.deleteMany({
-        lessonId: new ObjectId(lessonId),
-      });
-
-      res.send({
-        success: true,
-        message: "Reports ignored and cleared",
-      });
-    } catch (error) {
-      res.status(500).send({ success: false, message: error.message });
-    }
-  }
-);
-
-// --------------- Payment  ---------------------
-app.post("/create-payment-intent", verifyToken, async (req, res) => {
-  try {
-    const { amount } = req.body;
-    const email = req.user.email;
-
-    if (!amount) {
-      return res.status(400).send({ message: "Amount required" });
-    }
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount * 100, // Stripe uses cents
-      currency: "usd",
-      metadata: {
-        email,              // 👈 store user email
-        purpose: "lifetime_access",
-      },
     });
+    // GET /admin/reported-lessons/:lessonId
+    app.get(
+      "/admin/reported-lessons/:lessonId",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const requester = await UserCollection.findOne({
+            email: req.user.email,
+          });
 
-    res.send({
-      clientSecret: paymentIntent.client_secret,
-    });
-  } catch (error) {
-    res.status(500).send({ message: error.message });
-  }
-});
-app.post("/payment/confirm", verifyToken, async (req, res) => {
-  try {
-    const { paymentIntentId } = req.body;
-    const email = req.user.email;
+          if (!requester || requester.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden (Admin only)" });
+          }
 
-    if (!paymentIntentId) {
-      return res.status(400).send({ message: "PaymentIntent ID required" });
-    }
+          const { lessonId } = req.params;
 
-    // 1️⃣ Retrieve payment from Stripe
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+          const reports = await lessonsReports
+            .find({ lessonId: new ObjectId(lessonId) })
+            .sort({ timestamp: -1 })
+            .toArray();
 
-    if (paymentIntent.status !== "succeeded") {
-      return res.status(400).send({
-        success: false,
-        message: "Payment not successful",
-      });
-    }
+          res.send({
+            success: true,
+            reports,
+          });
+        } catch (error) {
+          res.status(500).send({ success: false, message: error.message });
+        }
+      }
+    );
+    // DELETE /admin/reported-lessons/:lessonId/ignore
+    app.delete(
+      "/admin/reported-lessons/:lessonId/ignore",
+      verifyToken,
+      async (req, res) => {
+        try {
+          const requester = await UserCollection.findOne({
+            email: req.user.email,
+          });
 
-    // 2️⃣ Update user to premium
-    const result = await UserCollection.updateOne(
-      { email },
-      {
-        $set: {
-          isPremium: true,
-          premiumAt: new Date(),
-          paymentIntentId,
-        },
+          if (!requester || requester.role !== "admin") {
+            return res.status(403).send({ message: "Forbidden (Admin only)" });
+          }
+
+          const { lessonId } = req.params;
+
+          await lessonsReports.deleteMany({
+            lessonId: new ObjectId(lessonId),
+          });
+
+          res.send({
+            success: true,
+            message: "Reports ignored and cleared",
+          });
+        } catch (error) {
+          res.status(500).send({ success: false, message: error.message });
+        }
       }
     );
 
-    res.send({
-      success: true,
-      message: "User upgraded to Premium",
-      result,
+    // --------------- Payment  ---------------------
+    app.post("/create-payment-intent", verifyToken, async (req, res) => {
+      try {
+        const { amount } = req.body;
+        const email = req.user.email;
+
+        if (!amount) {
+          return res.status(400).send({ message: "Amount required" });
+        }
+
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: amount * 100, // Stripe uses cents
+          currency: "usd",
+          metadata: {
+            email, // 👈 store user email
+            purpose: "lifetime_access",
+          },
+        });
+
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+    app.post("/payment/confirm", verifyToken, async (req, res) => {
+      try {
+        const { paymentIntentId } = req.body;
+        const email = req.user.email;
+
+        if (!paymentIntentId) {
+          return res.status(400).send({ message: "PaymentIntent ID required" });
+        }
+
+        // 1️⃣ Retrieve payment from Stripe
+        const paymentIntent = await stripe.paymentIntents.retrieve(
+          paymentIntentId
+        );
+
+        if (paymentIntent.status !== "succeeded") {
+          return res.status(400).send({
+            success: false,
+            message: "Payment not successful",
+          });
+        }
+
+        // 2️⃣ Update user to premium
+        const result = await UserCollection.updateOne(
+          { email },
+          {
+            $set: {
+              isPremium: true,
+              premiumAt: new Date(),
+              paymentIntentId,
+            },
+          }
+        );
+
+        res.send({
+          success: true,
+          message: "User upgraded to Premium",
+          result,
+        });
+      } catch (error) {
+        res.status(500).send({ message: error.message });
+      }
+    });
+
+app.get("/api/homepage-data", async (req, res) => {
+  try {
+    // 1️⃣ Featured Lessons (latest 10 featured lessons)
+    const featuredLessons = await LessonColletion.find({ featured: true })
+      .sort({ created_at: -1 })
+      .limit(4)
+      .toArray();
+
+    // 2️⃣ Top Contributors (lessons created in the last 7 days)
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+    const recentLessons = await LessonColletion.find({
+      $expr: { $gte: [{ $toDate: "$created_at" }, oneWeekAgo] },
+    }).toArray();
+
+    const contributorsCount = {};
+
+    for (let lesson of recentLessons) {
+      const email = lesson.author_email;
+      if (!contributorsCount[email]) {
+        contributorsCount[email] = {
+          author_name: lesson.author_name,
+          author_email: email,
+          author_photo: lesson.author_photo,
+          count: 0,
+        };
+      }
+      contributorsCount[email].count += 1;
+    }
+
+    const topContributors = Object.values(contributorsCount)
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5);
+
+    // 3️⃣ Most Saved Lessons (top 10 by saveCount)
+    const mostSavedLessons = await LessonColletion.find({})
+      .sort({ saveCount: -1 })
+      .limit(8)
+      .toArray();
+
+    // Send all data
+    res.status(200).json({
+      featuredLessons,
+      topContributors,
+      mostSavedLessons,
     });
   } catch (error) {
-    res.status(500).send({ message: error.message });
+    console.error("Error fetching homepage data:", error);
+    res.status(500).json({ message: "Failed to fetch homepage data", error: error.message });
   }
 });
-
-
 
 
     await client.db("admin").command({ ping: 1 });
