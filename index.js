@@ -6,8 +6,11 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 const app = express();
 const port = process.env.PORT || 3000;
+const firebaseKey=Buffer.from(process.env.FIREBASEJDK,'base64').toString('utf8')
 
-const serviceAccount = require("./firebaseAdminJdk.json");
+const serviceAccount = JSON.parse(firebaseKey);
+
+// const serviceAccount = require("./firebaseAdminJdk.json");
 const stripe = require("stripe")(process.env.STRIPE);
 
 admin.initializeApp({
@@ -16,7 +19,7 @@ admin.initializeApp({
 
 app.use(
   cors({
-    origin: ["http://localhost:5173"],
+    origin: ["http://localhost:5173","https://lessonlab-706ca.web.app"],
     credentials: true,
   })
 );
@@ -54,7 +57,7 @@ const verifyToken = async (req, res, next) => {
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
     // Send a ping to confirm a successful connection
 
     const database = client.db("Lessonlab");
@@ -1370,10 +1373,10 @@ app.get("/api/homepage-data", async (req, res) => {
 });
 
 
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
